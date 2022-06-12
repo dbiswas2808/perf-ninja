@@ -2,20 +2,28 @@
 #include <cassert>
 #include <type_traits>
 
-// The alignment algorithm which computes the alignment of the given sequence
-// pairs.
+using vectorized_val = std::array<uint8_t, sequence_count_v>;
+using vectorized_sequence_T = std::array<vectorized_val, sequence_size_v>;
+
+vectorized_sequence_T convert_to_seq_matrix_T (std::vector<sequence_t> const &sequences1) {
+  vectorized_sequence_T seq_mat;
+  for (int row = 0; row < sequence_size_v; ++row) {
+    for (int col = 0; col < sequence_count_v; ++col) {
+      seq_mat[row][col] = sequences1[col][row];
+    }
+  }
+
+  return seq_mat;
+}
+
 result_t compute_alignment(std::vector<sequence_t> const &sequences1,
                            std::vector<sequence_t> const &sequences2) {
-  result_t result{};
+    auto vectorized_seq_1 = convert_to_seq_matrix_T(sequences1);
+    auto vectorized_seq_2 = convert_to_seq_matrix_T(sequences2);
 
-  for (size_t sequence_idx = 0; sequence_idx < sequences1.size();
-       ++sequence_idx) {
     using score_t = int16_t;
-    using column_t = std::array<score_t, sequence_size_v + 1>;
-
-    sequence_t const &sequence1 = sequences1[sequence_idx];
-    sequence_t const &sequence2 = sequences2[sequence_idx];
-
+    using vectorized_score_t = std::array<score_t, sequence_count_v>;
+    using vectorized_score_column_t = std::array<vectorized_score_t, sequence_size_v + 1>;
     /*
      * Initialise score values.
      */
@@ -30,51 +38,62 @@ result_t compute_alignment(std::vector<sequence_t> const &sequences1,
      * since we are only interested in the last value of the last column in the
      * score matrix.
      */
-    column_t score_column{};
-    column_t horizontal_gap_column{};
+    vectorized_score_column_t score_column{};
+    vectorized_score_column_t horizontal_gap_column{};
+    vectorized_score_t last_vertical_gaps{};
 
     /*
      * Initialise the first column of the matrix.
      */
-    horizontal_gap_column[0] = gap_open;
-    score_t last_vertical_gap = gap_open;
+    horizontal_gap_column[0].fill(gap_open);
+    last_vertical_gaps.fill(gap_open);
 
     for (size_t i = 1; i < score_column.size(); ++i) {
-      score_column[i] = last_vertical_gap;
-      horizontal_gap_column[i] = last_vertical_gap + gap_open;
-      last_vertical_gap += gap_extension;
+      for (size_t j = 0; j < sequence_count_v; ++j) {
+        score_column[i][j] = last_vertical_gaps[j];
+        horizontal_gap_column[i][j] = last_vertical_gaps[j] + gap_open;
+        last_vertical_gaps[j] += gap_extension;
+      }
     }
 
     /*
      * Compute the main recursion to fill the matrix.
      */
-
-    for (unsigned col = 1; col <= sequence2.size(); ++col) {
-      column_t old_score_column = score_column;
-      score_t last_diagonal_score =
-          score_column[0]; // Cache last diagonal score to compute this cell.
+    for (unsigned col = 1; col <= vectorized_seq_2.size(); ++col) {
+      auto last_diagonal_score = score_column[0]; // Cache last diagonal score to compute this cell.
       score_column[0] = horizontal_gap_column[0];
-      horizontal_gap_column[0] += gap_extension;
+      for (int i = 0; i < sequence_count_v; ++i) {
+        last_vertical_gaps[i] = horizontal_gap_column[0][i] + gap_open;
+        horizontal_gap_column[0][i] += gap_extension;
+      }      
 
-      for (unsigned row = 1; row <= sequence1.size(); ++row) {
-        score_t best_cell_score = old_score_column[row - 1] + ((sequence1[row - 1] == sequence2[col - 1]) ? match : mismatch);
-        score_column[row] = max(best_cell_score, horizontal_gap_column[row]);
-      }
+      for (unsigned row = 1; row <= vectorized_seq_1.size(); ++row) {
+        // Compute next score from diagonal direction with match/mismatch.
+        vectorized_score_t best_cell_score = last_diagonal_score;
+        for (int i = 0; i < sequence_count_v; ++i) {
+          best_cell_score[i] +=
+              (vectorized_seq_1[row - 1][i] == vectorized_seq_2[col - 1][i] ? match : mismatch);
+        }
 
-      last_vertical_gap = horizontal_gap_column[0] + gap_open;
-      for (unsigned row = 1; row <= sequence1.size(); ++row) {
-        score_column[row] = max(score_column[row], last_vertical_gap);
-        last_vertical_gap = max(last_vertical_gap + gap_extension, score_column[row] + gap_open);
-      }
-
-      for (unsigned row = 1; row <= sequence1.size(); ++row) {
-        horizontal_gap_column[row] = max(horizontal_gap_column[row] + gap_extension, score_column[row] + gap_open);
+        for (int i = 0; i < sequence_count_v; ++i) {
+          // Determine best score from diagonal, vertical, or horizontal
+          // direction.
+          best_cell_score[i] = max(best_cell_score[i], last_vertical_gaps[i]);
+          best_cell_score[i] = max(best_cell_score[i], horizontal_gap_column[row][i]);
+          // Cache next diagonal value and store optimum in score_column.
+          last_diagonal_score[i] = score_column[row][i];
+          score_column[row][i] = best_cell_score[i];
+          // Compute the next values for vertical and horizontal gap.
+          best_cell_score[i] += gap_open;
+          last_vertical_gaps[i] += gap_extension;
+          horizontal_gap_column[row][i] += gap_extension;
+          // Store optimum between gap open and gap extension.
+          last_vertical_gaps[i] = max(last_vertical_gaps[i], best_cell_score[i]);
+          horizontal_gap_column[row][i] =
+              max(horizontal_gap_column[row][i], best_cell_score[i]);
+        }
       }
     }
 
-    // Report the best score.
-    result[sequence_idx] = score_column.back();
-  }
-
-  return result;
+    return score_column.back();
 }
